@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/context"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/sessions"
+	"github.com/pmylund/go-cache"
 	"html/template"
 	"log"
 	"net/http"
@@ -80,6 +81,24 @@ var (
 	ErrPermissionDenied = errors.New("Permission denied.")
 	ErrContentNotFound  = errors.New("Content not found.")
 )
+
+// cache
+var gocache = cache.New(30*time.Second, 10*time.Second)
+
+// utils
+func max(a int, b int) int {
+	if a < b {
+		return b
+	}
+	return a
+}
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 func authenticate(w http.ResponseWriter, r *http.Request, email, passwd string) {
 	query := `SELECT u.id AS id, u.account_name AS account_name, u.nick_name AS nick_name, u.email AS email
@@ -156,10 +175,16 @@ func getUserFromAccount(w http.ResponseWriter, name string) *User {
 func isFriend(w http.ResponseWriter, r *http.Request, anotherID int) bool {
 	session := getSession(w, r)
 	id := session.Values["user_id"]
+	key := fmt.Sprintf("rel-%d-%d", min(id.(int), anotherID), max(id.(int), anotherID))
+	rel, found := gocache.Get(key)
+	if found {
+		return rel.(bool)
+	}
 	row := db.QueryRow(`SELECT COUNT(1) AS cnt FROM relations WHERE (one = ? AND another = ?)`, id, anotherID)
 	cnt := new(int)
 	err := row.Scan(cnt)
 	checkErr(err)
+	gocache.Set(key, *cnt > 0, -1)
 	return *cnt > 0
 }
 
@@ -703,11 +728,14 @@ func PostFriends(w http.ResponseWriter, r *http.Request) {
 		another := getUserFromAccount(w, anotherAccount)
 		_, err := db.Exec(`INSERT INTO relations (one, another) VALUES (?,?), (?,?)`, user.ID, another.ID, another.ID, user.ID)
 		checkErr(err)
+		key := fmt.Sprintf("rel-%d-%d", min(user.ID, another.ID), max(another.ID, user.ID))
+		gocache.Set(key, true, -1)
 		http.Redirect(w, r, "/friends", http.StatusSeeOther)
 	}
 }
 
 func GetInitialize(w http.ResponseWriter, r *http.Request) {
+	gocache.Flush()
 	db.Exec("DELETE FROM relations WHERE id > 500000")
 	db.Exec("DELETE FROM footprints WHERE id > 500000")
 	db.Exec("DELETE FROM entries WHERE id > 500000")
