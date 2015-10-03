@@ -385,25 +385,22 @@ ORDER BY entry_ids_of_friends.created_at DESC LIMIT 10`, user.ID)
 	}
 	rows.Close()
 
-	rows, err = db.Query(`SELECT * FROM comments ORDER BY created_at DESC LIMIT 1000`)
+	rows, err = db.Query(`
+SELECT c.id, c.entry_id, c.user_id, c.comment, c.created_at, e.private, e.user_id FROM comments c
+JOIN comment_ids_of_friends cof ON c.id = cof.comment_id
+JOIN entries e ON e.id = c.entry_id
+WHERE cof.user_id = ?
+ORDER BY cof.created_at DESC LIMIT 1000`, user.ID)
 	if err != sql.ErrNoRows {
 		checkErr(err)
 	}
 	commentsOfFriends := make([]Comment, 0, 10)
 	for rows.Next() {
 		c := Comment{}
-		checkErr(rows.Scan(&c.ID, &c.EntryID, &c.UserID, &c.Comment, &c.CreatedAt))
-		if !isFriend(w, r, c.UserID) {
-			continue
-		}
-		row := db.QueryRow(`SELECT * FROM entries WHERE id = ?`, c.EntryID)
-		var id, userID, private int
-		var body string
-		var createdAt time.Time
-		checkErr(row.Scan(&id, &userID, &private, &body, &createdAt))
-		entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
-		if entry.Private {
-			if !permitted(w, r, entry.UserID) {
+		var entryUserID, private int
+		checkErr(rows.Scan(&c.ID, &c.EntryID, &c.UserID, &c.Comment, &c.CreatedAt, &private, &entryUserID))
+		if private == 1 {
+			if !permitted(w, r, entryUserID) {
 				continue
 			}
 		}
@@ -665,7 +662,13 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 	}
 	user := getCurrentUser(w, r)
 
-	_, err = db.Exec(`INSERT INTO comments (entry_id, user_id, comment) VALUES (?,?,?)`, entry.ID, user.ID, r.FormValue("comment"))
+	res, err := db.Exec(`INSERT INTO comments (entry_id, user_id, comment) VALUES (?,?,?)`, entry.ID, user.ID, r.FormValue("comment"))
+	checkErr(err)
+	commentId, err := res.LastInsertId()
+	checkErr(err)
+	_, err = db.Exec(`
+INSERT INTO comment_ids_of_friends (user_id, comment_id, created_at)
+SELECT another, ?, NOW() FROM relations WHERE one = ?`, commentId, user.ID)
 	checkErr(err)
 	http.Redirect(w, r, "/diary/entry/"+strconv.Itoa(entry.ID), http.StatusSeeOther)
 }
@@ -756,6 +759,24 @@ WHERE relations.one = ? ORDER BY recent_entries.created_at DESC LIMIT 10`
 	rows.Close()
 }
 
+func initializeCommentIdsOfFriends() {
+	db.Exec("DELETE FROM comment_ids_of_friends")
+	db.Exec("DELETE FROM recent_comments")
+	db.Exec(`INSERT INTO recent_comments (id, user_id, created_at) SELECT id, user_id, created_at FROM comments ORDER BY created_at DESC LIMIT 1000`)
+	rows, err := db.Query(`SELECT id FROM users`)
+	checkErr(err)
+	for rows.Next() {
+		var id int
+		checkErr(rows.Scan(&id))
+		query := `INSERT INTO comment_ids_of_friends (user_id, comment_id, created_at)
+SELECT one, recent_comments.id, recent_comments.created_at FROM recent_comments
+JOIN relations ON relations.another = recent_comments.user_id
+WHERE relations.one = ? ORDER BY recent_comments.created_at DESC LIMIT 10`
+		db.Exec(query, id)
+	}
+	rows.Close()
+}
+
 func GetInitialize(w http.ResponseWriter, r *http.Request) {
 	gocache.Flush()
 	db.Exec("DELETE FROM relations WHERE id > 500000")
@@ -763,6 +784,7 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 	db.Exec("DELETE FROM entries WHERE id > 500000")
 	db.Exec("DELETE FROM comments WHERE id > 1500000")
 	initializeEntryIdsOfFriends()
+	initializeCommentIdsOfFriends()
 }
 
 func main() {
