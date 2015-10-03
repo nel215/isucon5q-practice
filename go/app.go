@@ -361,7 +361,11 @@ LIMIT 10`, user.ID)
 	}
 	rows.Close()
 
-	rows, err = db.Query(`SELECT * FROM entries ORDER BY created_at DESC LIMIT 1000`)
+	rows, err = db.Query(`
+SELECT entries.id, entries.user_id, private, body, entries.created_at FROM entries
+JOIN entry_ids_of_friends ON entries.id = entry_ids_of_friends.entry_id
+WHERE entry_ids_of_friends.user_id = ?
+ORDER BY entry_ids_of_friends.created_at DESC LIMIT 10`, user.ID)
 	if err != sql.ErrNoRows {
 		checkErr(err)
 	}
@@ -371,13 +375,7 @@ LIMIT 10`, user.ID)
 		var body string
 		var createdAt time.Time
 		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		if !isFriend(w, r, userID) {
-			continue
-		}
 		entriesOfFriends = append(entriesOfFriends, Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt})
-		if len(entriesOfFriends) >= 10 {
-			break
-		}
 	}
 	rows.Close()
 
@@ -625,7 +623,13 @@ func PostEntry(w http.ResponseWriter, r *http.Request) {
 	} else {
 		private = 1
 	}
-	_, err := db.Exec(`INSERT INTO entries (user_id, private, body) VALUES (?,?,?)`, user.ID, private, title+"\n"+content)
+	res, err := db.Exec(`INSERT INTO entries (user_id, private, body) VALUES (?,?,?)`, user.ID, private, title+"\n"+content)
+	checkErr(err)
+	entryId, err := res.LastInsertId()
+	checkErr(err)
+	_, err = db.Exec(`
+INSERT INTO entry_ids_of_friends (user_id, entry_id, created_at)
+SELECT another, ?, NOW() FROM relations WHERE one = ?`, entryId, user.ID)
 	checkErr(err)
 	http.Redirect(w, r, "/diary/entries/"+user.AccountName, http.StatusSeeOther)
 }
@@ -728,12 +732,31 @@ func PostFriends(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func initializeEntryIdsOfFriends() {
+	db.Exec("DELETE FROM entry_ids_of_friends")
+	db.Exec("DELETE FROM recent_entries")
+	db.Exec(`INSERT INTO recent_entries (id, user_id, created_at) SELECT id, user_id, created_at FROM entries ORDER BY created_at DESC LIMIT 1000`)
+	rows, err := db.Query(`SELECT id FROM users`)
+	checkErr(err)
+	for rows.Next() {
+		var id int
+		checkErr(rows.Scan(&id))
+		query := `INSERT INTO entry_ids_of_friends (user_id, entry_id, created_at)
+SELECT one, recent_entries.id, recent_entries.created_at FROM recent_entries
+JOIN relations ON relations.another = recent_entries.user_id
+WHERE relations.one = ? ORDER BY recent_entries.created_at DESC LIMIT 10`
+		db.Exec(query, id)
+	}
+	rows.Close()
+}
+
 func GetInitialize(w http.ResponseWriter, r *http.Request) {
 	gocache.Flush()
 	db.Exec("DELETE FROM relations WHERE id > 500000")
 	db.Exec("DELETE FROM footprints WHERE id > 500000")
 	db.Exec("DELETE FROM entries WHERE id > 500000")
 	db.Exec("DELETE FROM comments WHERE id > 1500000")
+	initializeEntryIdsOfFriends()
 }
 
 func main() {
