@@ -352,9 +352,9 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 
 	rows, err = db.Query(`SELECT c.id AS id, c.entry_id AS entry_id, c.user_id AS user_id, c.comment AS comment, c.created_at AS created_at
 FROM comments c
-JOIN entries e ON c.entry_id = e.id
-WHERE e.user_id = ?
-ORDER BY c.created_at DESC
+JOIN comment_ids_for_me cfm ON cfm.comment_id = c.id
+WHERE cfm.user_id = ?
+ORDER BY cfm.created_at DESC
 LIMIT 10`, user.ID)
 	if err != sql.ErrNoRows {
 		checkErr(err)
@@ -670,6 +670,10 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 INSERT INTO comment_ids_of_friends (user_id, comment_id, created_at)
 SELECT another, ?, NOW() FROM relations WHERE one = ?`, commentId, user.ID)
 	checkErr(err)
+	_, err = db.Exec(`
+INSERT INTO comment_ids_for_me (user_id, comment_id, created_at)
+VALUES (?,?,?)`, entry.UserID, commentId, time.Now().Unix())
+	checkErr(err)
 	http.Redirect(w, r, "/diary/entry/"+strconv.Itoa(entry.ID), http.StatusSeeOther)
 }
 
@@ -783,6 +787,7 @@ func GetInitialize(w http.ResponseWriter, r *http.Request) {
 	db.Exec("DELETE FROM footprints WHERE id > 500000")
 	db.Exec("DELETE FROM entries WHERE id > 500000")
 	db.Exec("DELETE FROM comments WHERE id > 1500000")
+	db.Exec("DELETE FROM comment_ids_for_me WHERE comment_id > 1500000")
 	initializeEntryIdsOfFriends()
 	initializeCommentIdsOfFriends()
 }
