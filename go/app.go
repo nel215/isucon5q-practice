@@ -151,6 +151,11 @@ func authenticated(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func getUser(w http.ResponseWriter, userID int) *User {
+	key := fmt.Sprintf("user-%d", userID)
+	cachedUser, found := gocache.Get(key)
+	if found {
+		return cachedUser.(*User)
+	}
 	row := db.QueryRow(`SELECT * FROM users WHERE id = ?`, userID)
 	user := User{}
 	err := row.Scan(&user.ID, &user.AccountName, &user.NickName, &user.Email, new(string))
@@ -158,6 +163,7 @@ func getUser(w http.ResponseWriter, userID int) *User {
 		checkErr(ErrContentNotFound)
 	}
 	checkErr(err)
+	gocache.Set(key, &user, -1)
 	return &user
 }
 
